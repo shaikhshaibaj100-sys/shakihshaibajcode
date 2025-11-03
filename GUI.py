@@ -1,316 +1,284 @@
-# main.py
-import threading
-import json
-import os
-import sys
-import subprocess as sp
-from time import sleep
-from asyncio import run as asyncio_run
+# assistant_gui.py (Fixed mic size inside circle + medium/black theme)
+
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QTextEdit, QStackedWidget, QWidget,
+    QVBoxLayout, QHBoxLayout, QPushButton, QFrame, QLabel
+)
+from PyQt5.QtGui import (
+    QPainter, QMovie, QFont, QPixmap, QCursor
+)
+from PyQt5.QtCore import Qt, QSize, QTimer
+
 from dotenv import dotenv_values
+import sys
+import os
 
-# Import integration functions from your GUI module and backend modules.
-# NOTE: your original code attempted to import `GraphicalUserInterface` which didn't exist.
-# Your GUI file uses `run_app()` as the entrypoint — import that instead.
-from .Frontend.Gui import (
-    run_app,                 # GUI entrypoint (previously missing GraphicalUserInterface)
-    setAssistantStatus,
-    ShowTextToScreen,
-    TempDirectorypath,
-    SetMicrophoneStatus,
-    AnswerModifier,
-    QueryModifire,
-    GetMicrophoneStatus,
-    GetAssistantStatus
-)
-
-from .Backend.model import FirstlayerDMM
-from .Backend.realtimesearchengine import realtimesearchengine
-from .Backend.automation import automation
-from .Backend.speechtotext import speechRecognition
-from .Backend.chatbot import chat_bot
-from .Backend.texttospeech import texttospeech
-
-# -----------------------
-# Config and globals
-# -----------------------
+# ---------- Configuration ----------
 env_vars = dotenv_values(".env")
-Username = env_vars.get("USERNAME", "User")
-Assistantname = env_vars.get("ASSISTANT", "Assistant")
+Assistantname = env_vars.get("Assistantname", "Assistant")
 
-# Default message shown when chatlog is empty
-DefaultMessage = (
-    f"{Username}: Hello {Assistantname}, how are you?\n"
-    f"{Assistantname}: Welcome {Username}, I am doing well. How can I help you?"
-)
+FILES_DIR = r"C:\pthiin code\Frontend\Files"
+GRAPHICS_DIR = r"C:\pthiin code\Frontend\Graphics"
 
-DATA_CHATLOG = r"Data\Chatlog.json"
-subprocesses = []  # to store child processes started for image generation etc.
+os.makedirs(FILES_DIR, exist_ok=True)
+os.makedirs(GRAPHICS_DIR, exist_ok=True)
 
-# Commands recognized by automation (keep as you had)
-Function = ["open", "close", "play", "system", "content", "google search", "youtube search"]
+MIC_FILE = os.path.join(FILES_DIR, "mic.data")
+STATUS_FILE = os.path.join(FILES_DIR, "status.data")
+RESPONSE_FILE = os.path.join(FILES_DIR, "response.data")
 
-# -----------------------
-# Helper functions
-# -----------------------
-def ensure_chatlog_exists():
-    os.makedirs(os.path.dirname(DATA_CHATLOG), exist_ok=True)
-    if not os.path.isfile(DATA_CHATLOG):
-        with open(DATA_CHATLOG, "w", encoding="utf-8") as f:
-            json.dump([], f, indent=2)
+for p in (MIC_FILE, STATUS_FILE, RESPONSE_FILE):
+    if not os.path.exists(p):
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("")
 
-def ShowDefaultChatIfNoChats():
-    ensure_chatlog_exists()
+
+# ---------- Helper Functions ----------
+def get_graphics_path(filename: str) -> str:
+    return os.path.join(GRAPHICS_DIR, filename)
+
+def set_microphone_status(status: str):
+    with open(MIC_FILE, "w", encoding="utf-8") as f:
+        f.write(status)
+
+def get_microphone_status() -> str:
     try:
-        with open(DATA_CHATLOG, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-            if len(content) < 5:
-                # write blank database and response placeholders to temp dir
-                with open(TempDirectorypath("database.data"), 'w', encoding='utf-8') as file:
-                    file.write("")
-                with open(TempDirectorypath("response.data"), 'w', encoding='utf-8') as file:
-                    file.write(DefaultMessage)
-    except Exception as e:
-        print("Error in ShowDefaultChatIfNoChats:", e)
+        with open(MIC_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except:
+        return "False"
 
-def ReadChatLogJson():
-    ensure_chatlog_exists()
-    try:
-        with open(DATA_CHATLOG, 'r', encoding='utf-8') as file:
-            return json.load(file)
-    except Exception as e:
-        print("Error reading chatlog json:", e)
-        return []
 
-def ChatLogIntegration():
-    json_data = ReadChatLogJson()
-    formatted_chatlog = ""
-    for entry in json_data:
-        role = entry.get("role", "")
-        content = entry.get("content", "")
-        if role == "user":
-            formatted_chatlog += f"{Username}: {content}\n"
-        elif role == "assistant":
-            formatted_chatlog += f"{Assistantname}: {content}\n"
+# ---------- Mic Button Widget ----------
+class MicButton(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedSize(100, 100)   # Circle size reduced
+        self.toggled = False
 
-    # Clean and modify answer text for GUI display
-    try:
-        modified = AnswerModifier(formatted_chatlog)
-    except Exception:
-        modified = formatted_chatlog
+        self.icon_on = get_graphics_path("mic_on.png")
+        self.icon_off = get_graphics_path("mic_off.png")
 
-    try:
-        with open(TempDirectorypath("database.data"), "w", encoding='utf-8') as file:
-            file.write(modified)
-    except Exception as e:
-        print("Error writing database.data:", e)
+        # Default mic off
+        self.load_icon(self.icon_off)
+        set_microphone_status("False")
 
-def ShowChatOnGui():
-    db_path = TempDirectorypath("database.data")
-    resp_path = TempDirectorypath("response.data")
-    try:
-        with open(db_path, "r", encoding="utf-8") as f:
-            data = f.read()
-    except Exception:
-        data = ""
+        # Click to toggle
+        self.mousePressEvent = self.toggle_mic
 
-    if data and len(str(data).strip()) > 0:
-        # write final result to response.data for GUI to pick up
-        try:
-            with open(resp_path, "w", encoding="utf-8") as f:
-                f.write(data)
-        except Exception as e:
-            print("Error writing response.data:", e)
+    def load_icon(self, path):
+        if os.path.exists(path):
+            # Smaller icon to fit circle properly
+            pixmap = QPixmap(path).scaled(55, 55, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.setPixmap(pixmap)
 
-def InitialExecution():
-    try:
-        SetMicrophoneStatus("False")
-    except Exception:
-        try:
-            setAssistantStatus("Avaliable.....")
-        except Exception:
-            pass
-
-    ShowTextToScreen("")
-    ShowDefaultChatIfNoChats()
-    ChatLogIntegration()
-    ShowChatOnGui()
-
-InitialExecution()
-
-# -----------------------
-# Main assistant flow
-# -----------------------
-def mainExecution():
-    try:
-        TaskExecution = False
-        ImageExecution = False
-        ImagegenerationQuery = ''
-
-        # update GUI status and get user speech input
-        setAssistantStatus("Listening....")
-        Query = speechRecognition()
-        if not Query:
-            return False
-
-        ShowTextToScreen(f"{Username}: {Query}")
-        setAssistantStatus("Thinking....")
-
-        decision = FirstlayerDMM(Query)
-        print("\nDecision:", decision, "\n")
-
-        # detect presence of general/realtime decisions
-        G = any([i for i in decision if i.startswith("general")])
-        R = any([i for i in decision if i.startswith("realtime")])
-
-        # Merge queries for "general" or "realtime" items into a single query string
-        merged_parts = []
-        for i in decision:
-            if i.startswith("general") or i.startswith("realtime"):
-                # remove prefix word and keep the rest
-                parts = i.split(maxsplit=1)
-                if len(parts) > 1:
-                    merged_parts.append(parts[1])
-        Mearged_Query = " and ".join(merged_parts).strip()
-
-        # detect image generation
-        for q in decision:
-            if "generate" in q:
-                ImagegenerationQuery = str(q)
-                ImageExecution = True
-
-        # automation tasks
-        for q in decision:
-            if not TaskExecution:
-                if any(q.startswith(func) for func in Function):
-                    try:
-                        # automation may be synchronous or asynchronous — call accordingly
-                        result = automation(list(decision))
-                        if hasattr(result, "__await__"):
-                            asyncio_run(result)
-                        TaskExecution = True
-                    except Exception as e:
-                        print("Error running automation:", e)
-                        TaskExecution = True  # avoid retry loop
-
-        # handle image generation process
-        if ImageExecution:
-            try:
-                img_file = r"C:\pthiin code\Frontend\Files\Imagegeneration.data"
-                os.makedirs(os.path.dirname(img_file), exist_ok=True)
-                with open(img_file, "w", encoding="utf-8") as file:
-                    file.write(f"{ImagegenerationQuery},True")
-
-                p1 = sp.Popen(
-                    ["python", r"C:\pthiin code\Backend\Imagegeneration.py"],
-                    stdout=sp.PIPE, stderr=sp.PIPE, stdin=sp.PIPE, shell=False
-                )
-                subprocesses.append(p1)
-            except Exception as e:
-                print(f"Error starting Imagegeneration.py: {e}")
-
-        # if both general and realtime or realtime only -> realtime path
-        if R:
-            setAssistantStatus("Searching.....")
-            try:
-                Answer = realtimesearchengine(QueryModifire(Mearged_Query if Mearged_Query else Query))
-            except Exception as e:
-                Answer = f"Error while doing realtime search: {e}"
-            ShowTextToScreen(f"{Assistantname}: {Answer}")
-            setAssistantStatus("Answering.....")
-            try:
-                texttospeech(Answer)
-            except Exception as e:
-                print("Error during TTS:", e)
-            return True
-
-        # fallback: iterate decision items
-        for q in decision:
-            if q.startswith("general"):
-                setAssistantStatus("Thinking.....")
-                # remove 'general' prefix
-                QueryFinal = q.replace("general", "", 1).strip()
-                Answer = chat_bot(QueryModifire(QueryFinal))
-                ShowTextToScreen(f"{Assistantname}: {Answer}")
-                setAssistantStatus("Answering......")
-                try:
-                    texttospeech(Answer)
-                except Exception as e:
-                    print("Error during TTS:", e)
-                return True
-
-            elif q.startswith("realtime"):
-                setAssistantStatus("Searching.....")
-                QueryFinal = q.replace("realtime", "", 1).strip()
-                Answer = realtimesearchengine(QueryModifire(QueryFinal))
-                ShowTextToScreen(f"{Assistantname}: {Answer}")
-                setAssistantStatus("Answering.....")
-                try:
-                    texttospeech(Answer)
-                except Exception as e:
-                    print("Error during TTS:", e)
-                return True
-
-            elif q == "exit" or "exit" in q:
-                QueryFinal = "okay, Bye !!"
-                Answer = chat_bot(QueryModifire(QueryFinal))
-                ShowTextToScreen(f"{Assistantname}: {Answer}")
-                setAssistantStatus("Answering.....")
-                try:
-                    texttospeech(Answer)
-                except Exception:
-                    pass
-                os._exit(0)
-
-    except Exception as e:
-        print("Unhandled error in mainExecution:", e)
-        try:
-            setAssistantStatus("Error")
-        except Exception:
-            pass
-    return False
-
-# -----------------------
-# Threads: worker + GUI
-# -----------------------
-def FirstThread():
-    # worker loop checks mic status and runs assistant when mic is active
-    while True:
-        try:
-            currentstatus = GetMicrophoneStatus()
-        except Exception:
-            currentstatus = "False"
-
-        if str(currentstatus).strip().lower() == "true":
-            mainExecution()
-            # small pause to avoid busy loops
-            sleep(0.3)
+    def toggle_mic(self, event=None):
+        self.toggled = not self.toggled
+        if self.toggled:
+            self.load_icon(self.icon_on)
+            self.setStyleSheet("""
+                QLabel {
+                    border: 4px solid #00ffcc;
+                    border-radius: 50px;
+                    background-color: black;
+                    box-shadow: 0 0 20px #00ffcc;
+                }
+            """)
+            set_microphone_status("True")
         else:
-            try:
-                AIstatus = GetAssistantStatus()
-            except Exception:
-                AIstatus = ""
-            if "Avaliable" in str(AIstatus):
-                sleep(0.1)
-            else:
-                try:
-                    setAssistantStatus("Avaliable.....")
-                except Exception:
-                    pass
-            sleep(0.1)
+            self.load_icon(self.icon_off)
+            self.setStyleSheet("""
+                QLabel {
+                    border: 4px solid red;
+                    border-radius: 50px;
+                    background-color: black;
+                }
+            """)
+            set_microphone_status("False")
 
-def secondThread():
-    # Start your GUI - must run in main thread for PyQt apps.
-    # We will call run_app() from Frontend.Gui here.
-    try:
-        run_app()
-    except Exception as e:
-        print("Error starting GUI:", e)
-        raise
+
+# ---------- Chat Section (small GIF, bottom-right) ----------
+class ChatSection(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # Chat box
+        self.chat_text_edit = QTextEdit()
+        self.chat_text_edit.setReadOnly(True)
+        self.chat_text_edit.setFrameStyle(QFrame.NoFrame)
+        self.chat_text_edit.setFont(QFont("Segoe UI", 13))
+        self.chat_text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: black;
+                color: white;
+                border: none;
+                padding: 10px;
+            }
+        """)
+        layout.addWidget(self.chat_text_edit)
+
+        # Small GIF in bottom-right corner
+        self.gif_label = QLabel()
+        self.gif_label.setStyleSheet("background-color: black; padding: 5px;")
+        gif_path = get_graphics_path("jarvis.gif.gif")
+
+        if os.path.exists(gif_path):
+            movie = QMovie(gif_path)
+            movie.setScaledSize(QSize(260, 160))  # small GIF size
+            self.gif_label.setMovie(movie)
+            movie.start()
+
+        gif_container = QHBoxLayout()
+        gif_container.addStretch(1)
+        gif_container.addWidget(self.gif_label, alignment=Qt.AlignBottom | Qt.AlignRight)
+        layout.addLayout(gif_container)
+
+        # Mic + Status
+        mic_layout = QHBoxLayout()
+        self.mic_button = MicButton()
+        mic_layout.addWidget(self.mic_button, alignment=Qt.AlignCenter)
+        layout.addLayout(mic_layout)
+
+        self.label = QLabel("Listening status will appear here...")
+        self.label.setStyleSheet("color: cyan; font-size: 18px; font-weight: bold;")
+        self.label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.label, alignment=Qt.AlignCenter)
+
+        # Timer updates
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_status)
+        self.timer.start(400)
+
+    def update_status(self):
+        try:
+            with open(STATUS_FILE, "r", encoding="utf-8") as f:
+                status = f.read().strip()
+        except Exception:
+            status = ""
+        self.label.setText(status)
+
+
+# ---------- Initial Screen (medium GIF centered) ----------
+class InitialScreen(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 80, 0, 80)
+        layout.setSpacing(25)
+
+        # Medium GIF (centered)
+        gif_label = QLabel()
+        gif_label.setAlignment(Qt.AlignCenter)
+        gif_label.setStyleSheet("background-color: black; padding: 10px;")
+
+        gif_path = get_graphics_path("jarvis.gif.gif")
+        if os.path.exists(gif_path):
+            movie = QMovie(gif_path)
+            movie.setScaledSize(QSize(520, 320))
+            gif_label.setMovie(movie)
+            movie.start()
+        layout.addWidget(gif_label, alignment=Qt.AlignCenter)
+
+        # Mic Button Below GIF
+        self.mic_button = MicButton()
+        layout.addWidget(self.mic_button, alignment=Qt.AlignCenter)
+
+        # Label
+        self.label = QLabel(f"{Assistantname} is ready to assist you.")
+        self.label.setStyleSheet("color:white;font-size:20px;font-weight:bold;")
+        self.label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.label)
+
+        self.setLayout(layout)
+        self.setStyleSheet("background-color:black;")
+
+
+# ---------- Message Screen ----------
+class MessageScreen(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout()
+        chat_section = ChatSection()
+        layout.addWidget(chat_section)
+        self.setLayout(layout)
+        self.setStyleSheet("background-color:black;")
+
+
+# ---------- Custom Top Bar ----------
+class CustomTopBar(QWidget):
+    def __init__(self, parent, stacked_widget: QStackedWidget):
+        super().__init__(parent)
+        self.stacked_widget = stacked_widget
+        self.initUI()
+
+    def initUI(self):
+        self.setFixedHeight(55)
+        layout = QHBoxLayout(self)
+        layout.setAlignment(Qt.AlignRight)
+        layout.setContentsMargins(10, 0, 10, 0)
+
+        title_label = QLabel(f"🎙️ {Assistantname} AI")
+        title_label.setStyleSheet("color:black;font-size:19px;font-weight:bold;background-color:white;")
+
+        home_button = QPushButton("🏠 Home")
+        home_button.setStyleSheet("background:white;color:black;font-weight:bold;padding:5px 15px;")
+
+        chat_button = QPushButton("💬 Chat")
+        chat_button.setStyleSheet("background:white;color:black;font-weight:bold;padding:5px 15px;")
+
+        close_button = QPushButton("❌")
+        close_button.setStyleSheet("background:white;color:red;font-weight:bold;padding:5px 15px;")
+        close_button.clicked.connect(lambda: self.window().close())
+
+        home_button.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(0))
+        chat_button.clicked.connect(lambda: self.stacked_widget.setCurrentIndex(1))
+
+        layout.addWidget(title_label)
+        layout.addStretch(1)
+        layout.addWidget(home_button)
+        layout.addWidget(chat_button)
+        layout.addWidget(close_button)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.white)
+        super().paintEvent(event)
+
+
+# ---------- Main Window ----------
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlag(Qt.FramelessWindowHint)
+        self.initUI()
+
+    def initUI(self):
+        stacked_widget = QStackedWidget(self)
+        initial_screen = InitialScreen()
+        message_screen = MessageScreen()
+        stacked_widget.addWidget(initial_screen)
+        stacked_widget.addWidget(message_screen)
+
+        self.setStyleSheet("background-color:black;")
+        top_bar = CustomTopBar(self, stacked_widget)
+        self.setMenuWidget(top_bar)
+        self.setCentralWidget(stacked_widget)
+        self.showMaximized()
+
+
+# ---------- Entry Point ----------
+def run_app():
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
-    # Start worker thread (daemon so it won't block program exit)
-    worker = threading.Thread(target=FirstThread, daemon=True)
-    worker.start()
+    run_app()
 
-    # Run GUI in the main thread
-    secondThread()
